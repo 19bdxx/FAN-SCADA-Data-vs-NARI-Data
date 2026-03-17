@@ -251,7 +251,7 @@
 
 ### 8.1 对齐脚本
 
-文件：`align_timestamps.py`（位于仓库根目录）
+文件：`align_timestamps.py`（位于项目根目录）
 
 **运行方式：**
 
