@@ -1,23 +1,33 @@
 """
-#9 多步功率预测.py  （第二版：三层分层实验设计）
+#9 多步功率预测.py  （第三版：层1补充无SCADA对比）
 ================================================
 利用当前时刻及历史时序数据预测未来多个时刻风机功率
 
 研究背景
 --------
-第一版 (#9 v1) 的特征实验设计过于简单：只用了 90m 单距离和全距离两组，
-未系统比较不同距离对多步预测的影响，也未将 #8 中的 VShear/HShear/TI 气象特征
-迁移到多步任务中。本版本（v2）采用三层递进的分层实验设计，逐层回答更细化的科学问题。
+第二版（v2）采用三层递进分层实验设计。本版（v3）在层1中补充了
+"仅 LiDAR 无 SCADA"对比组（N1/N2/N3/N4），专门回答：
+  "层1中 LiDAR+SCADA 效果不如纯 SCADA 的原因，是 LiDAR 信息不足，
+   还是 LiDAR 与 SCADA 风速相互干扰所致？"
 
-三层实验设计
-------------
-层1 ── 风速距离结构实验（回答"多步预测下哪个距离最优？最优距离是否随步长变化？"）
+三层实验设计（第三版）
+----------------------
+层1 ── 风速距离结构实验
+
+  含 SCADA 组（M 组）：
     M0  : 仅 SCADA 机舱风速 + 历史功率（无激光雷达基准）
     M1  : 单距离 LiDAR（逐距离 40, 60, ..., 300 m）+ SCADA + 历史功率
     M2  : 近距组（40~120m LiDAR HWS）+ SCADA + 历史功率
     M3  : 中距组（150~210m LiDAR HWS）+ SCADA + 历史功率
     M4  : 远距组（240~300m LiDAR HWS）+ SCADA + 历史功率
     M5  : 全距离（40~300m LiDAR HWS）+ SCADA + 历史功率
+
+  无 SCADA 组（N 组，新增）：
+    N1  : 单距离 LiDAR（逐距离 40, 60, ..., 300 m）+ 历史功率（不含SCADA风速）
+    N2  : 近距组（40~120m LiDAR HWS）+ 历史功率（不含SCADA风速）
+    N3  : 中距组（150~210m LiDAR HWS）+ 历史功率（不含SCADA风速）
+    N4  : 远距组（240~300m LiDAR HWS）+ 历史功率（不含SCADA风速）
+    注：全距离无SCADA（N5 概念）= 层3的 L3a，已涵盖。
 
 层2 ── 气象特征增益实验（在 M5 基础上，回答"VShear/HShear/TI 在多步预测中是否有增益？"）
     E1  : M5 + VShear（10 个距离）
@@ -32,7 +42,7 @@
 
 建模策略
 --------
-- LightGBM / XGBoost：所有 21 个场景均运行，直接多步策略
+- LightGBM / XGBoost：所有 34 个场景均运行，直接多步策略
   （每预测步长单独训练一个模型，输入为展平的历史特征矩阵）
 - LSTM（双层多输出）：仅在 4 个关键场景运行（M0/M5/L3a/L3b），节省运行时间
   （一个模型同时预测所有 FORECAST_STEPS 步）
@@ -104,8 +114,9 @@ _all_met    = _all_vshear + _all_hshear + _all_ti   # 30 个气象特征列
 # 格式：key -> (feat_cols, display_name, layer_number)
 # ──────────────────────────────────────────────────────────────
 
-# 层1：风速距离结构（15 个场景）
+# 层1：风速距离结构（15 个含SCADA场景 + 13 个无SCADA场景 = 28 个场景）
 L1_SCENARIOS = {
+    # ── 含 SCADA 组（M 组）──────────────────────────────────────
     "M0_SCADA": (
         ["HWS_scada", "power"],
         "M0: 仅SCADA（无LiDAR）", 1),
@@ -125,6 +136,20 @@ L1_SCENARIOS = {
     "M5_Lall+SCADA": (
         _all_hws + ["HWS_scada", "power"],
         "M5: 全距离LiDAR + SCADA", 1),
+    # ── 无 SCADA 组（N 组）：回答"LiDAR 与 SCADA 是否相互干扰？"────
+    **{f"N1_{d}m_only": (
+        [f"HWS_{d}m", "power"],
+        f"N1: 仅LiDAR {d}m（无SCADA）", 1)
+       for d in LIDAR_DISTANCES},
+    "N2_near_only": (
+        _near_hws + ["power"],
+        "N2: 仅近距(40-120m)（无SCADA）", 1),
+    "N3_mid_only": (
+        _mid_hws + ["power"],
+        "N3: 仅中距(150-210m)（无SCADA）", 1),
+    "N4_far_only": (
+        _far_hws + ["power"],
+        "N4: 仅远距(240-300m)（无SCADA）", 1),
 }
 
 # 层2：气象特征增益（4 个场景，M5 结果作为 E0 基准直接引用）
@@ -633,49 +658,56 @@ def _setup_heatmap_ax(ax, pivot, title, plt):
 
 def _plot_l1_distance_scan(df_res, plt):
     """
-    层1 图A：逐距离扫描折线图。
+    层1 图A：逐距离扫描折线图（M1含SCADA vs N1无SCADA 双线对比）。
     x 轴 = LiDAR 测量距离（40~300m）
     y 轴 = RMSE（kW）
+    实线 = M1（LiDAR + SCADA），虚线 = N1（仅 LiDAR，无 SCADA）
     线色 = 各预测步长（+10/+20/+30/+60 min）
-    每个子图 = 一个树模型
-    水平虚线 = M0 SCADA 基准
+    水平点线 = M0 SCADA 基准
     """
-    single_dist_keys = [f"M1_{d}m" for d in LIDAR_DISTANCES]
-    x_vals = LIDAR_DISTANCES
+    m1_keys = [f"M1_{d}m"      for d in LIDAR_DISTANCES]
+    n1_keys = [f"N1_{d}m_only" for d in LIDAR_DISTANCES]
+    x_vals  = LIDAR_DISTANCES
 
     for model_name in ["LightGBM", "XGBoost"]:
         sub_m = df_res[df_res["model"] == model_name]
         m0    = sub_m[sub_m["scenario_key"] == "M0_SCADA"]
 
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5), sharey=True)
 
-        for h in FORECAST_STEPS:
-            step_min = h * 10
-            rmse_vals = []
-            for dk in single_dist_keys:
-                row = sub_m[(sub_m["scenario_key"] == dk) &
-                            (sub_m["step_min"] == step_min)]
-                rmse_vals.append(row["RMSE"].values[0] if not row.empty else np.nan)
+        for ax_idx, (keys, linestyle, with_scada_label) in enumerate([
+            (m1_keys, "solid",  "实线：LiDAR + SCADA"),
+            (n1_keys, "dashed", "虚线：仅LiDAR（无SCADA）"),
+        ]):
+            ax = axes[ax_idx]
+            for h in FORECAST_STEPS:
+                step_min  = h * 10
+                rmse_vals = []
+                for dk in keys:
+                    row = sub_m[(sub_m["scenario_key"] == dk) &
+                                (sub_m["step_min"] == step_min)]
+                    rmse_vals.append(row["RMSE"].values[0] if not row.empty else np.nan)
 
-            ax.plot(x_vals, rmse_vals,
-                    marker="o", color=_STEP_COLORS[step_min],
-                    linewidth=2, markersize=6, label=f"+{step_min}min")
+                ax.plot(x_vals, rmse_vals,
+                        marker="o", color=_STEP_COLORS[step_min],
+                        linewidth=2, markersize=6, label=f"+{step_min}min")
 
-            # M0 baseline
-            m0_rmse = m0[m0["step_min"] == step_min]["RMSE"].values
-            if m0_rmse.size:
-                ax.axhline(m0_rmse[0], color=_STEP_COLORS[step_min],
-                           linestyle="--", linewidth=1, alpha=0.5)
+                # M0 baseline（点线）
+                m0_rmse = m0[m0["step_min"] == step_min]["RMSE"].values
+                if m0_rmse.size:
+                    ax.axhline(m0_rmse[0], color=_STEP_COLORS[step_min],
+                               linestyle=":", linewidth=1, alpha=0.6)
 
-        ax.set_xlabel("LiDAR 测量距离 (m)", fontsize=12)
-        ax.set_ylabel("RMSE (kW)", fontsize=12)
-        ax.set_title(f"{model_name}：逐距离 LiDAR HWS 的多步预测 RMSE\n"
-                     f"（虚线 = SCADA 基准 M0，实线 = LiDAR 单距离 + SCADA）",
-                     fontsize=11)
-        ax.set_xticks(x_vals)
-        ax.legend(title="预测步长", fontsize=9)
-        ax.grid(alpha=0.3)
+            ax.set_xlabel("LiDAR 测量距离 (m)", fontsize=12)
+            ax.set_ylabel("RMSE (kW)", fontsize=12)
+            ax.set_title(f"{model_name}：{with_scada_label}\n"
+                         f"（点线 = SCADA 基准 M0）", fontsize=11)
+            ax.set_xticks(x_vals)
+            ax.legend(title="预测步长", fontsize=9)
+            ax.grid(alpha=0.3)
 
+        plt.suptitle(f"{model_name}：逐距离 LiDAR HWS — 含SCADA(左) vs 无SCADA(右)",
+                     fontsize=12, fontweight="bold")
         plt.tight_layout()
         fpath = os.path.join(OUTPUT_DIR, f"#9_L1a_距离扫描_{model_name}.png")
         plt.savefig(fpath, dpi=150)
@@ -683,14 +715,72 @@ def _plot_l1_distance_scan(df_res, plt):
         print(f"  图表已保存：{fpath}")
 
 
+def _plot_l1_scada_delta(df_res, plt):
+    """
+    层1 图C：SCADA 干扰量热力图（新增）。
+    Δ RMSE = N1_RMSE（无SCADA）− M1_RMSE（含SCADA）
+      Δ > 0：去掉 SCADA 后 RMSE 升高 → SCADA 对该距离有正向贡献
+      Δ < 0：去掉 SCADA 后 RMSE 降低 → SCADA 对该距离造成干扰
+    行 = 距离，列 = 预测步长，颜色 = Δ 值（绿=干扰，红=有益）
+    """
+    for model_name in ["LightGBM", "XGBoost"]:
+        sub_m = df_res[df_res["model"] == model_name]
+        deltas = []
+        for d in LIDAR_DISTANCES:
+            row_delta = []
+            for sm in _STEP_MINS:
+                r_m1 = sub_m[(sub_m["scenario_key"] == f"M1_{d}m") &
+                             (sub_m["step_min"] == sm)]["RMSE"].values
+                r_n1 = sub_m[(sub_m["scenario_key"] == f"N1_{d}m_only") &
+                             (sub_m["step_min"] == sm)]["RMSE"].values
+                row_delta.append(
+                    float(r_n1[0] - r_m1[0]) if (r_m1.size and r_n1.size) else np.nan)
+            deltas.append(row_delta)
+
+        pivot = pd.DataFrame(deltas,
+                             index=[f"{d}m" for d in LIDAR_DISTANCES],
+                             columns=_STEP_MINS)
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        abs_max = np.nanmax(np.abs(pivot.values))
+        im = ax.imshow(pivot.values, cmap="RdYlGn_r", aspect="auto",
+                       vmin=-abs_max, vmax=abs_max)
+        plt.colorbar(im, ax=ax, label="Δ RMSE (kW)：N1 − M1（正 = SCADA有益，负 = SCADA干扰）")
+
+        ax.set_xticks(range(len(_STEP_MINS)))
+        ax.set_xticklabels([f"+{c}min" for c in _STEP_MINS], fontsize=10)
+        ax.set_yticks(range(len(LIDAR_DISTANCES)))
+        ax.set_yticklabels([f"{d}m" for d in LIDAR_DISTANCES], fontsize=9)
+        ax.set_xlabel("预测步长 (min)", fontsize=11)
+        ax.set_title(f"{model_name}：SCADA 干扰量 Δ RMSE = 无SCADA(N1) − 含SCADA(M1)\n"
+                     f"（红 = SCADA 有益 / 绿 = SCADA 有害）", fontsize=11)
+
+        for ri in range(len(LIDAR_DISTANCES)):
+            for ci in range(len(_STEP_MINS)):
+                v = pivot.values[ri, ci]
+                if not np.isnan(v):
+                    ax.text(ci, ri, f"{v:+.0f}", ha="center", va="center",
+                            fontsize=8, color="black")
+
+        plt.tight_layout()
+        fpath = os.path.join(OUTPUT_DIR, f"#9_L1c_SCADA干扰量_{model_name}.png")
+        plt.savefig(fpath, dpi=150)
+        plt.close(fig)
+        print(f"  图表已保存：{fpath}")
+
+
 def _plot_l1_group_heatmap(df_res, plt):
     """
-    层1 图B：距离组合对比热力图。
-    行 = {M0, M2, M3, M4, M5}，列 = 预测步长，颜色 = RMSE
+    层1 图B：距离组合对比热力图（含SCADA 与 无SCADA 两组并排）。
+    上半部分 = M 组（含SCADA），下半部分 = N 组（无SCADA）
+    行 = 场景，列 = 预测步长，颜色 = RMSE
     """
-    group_keys   = ["M0_SCADA", "M2_near", "M3_mid", "M4_far", "M5_Lall+SCADA"]
-    group_labels = ["M0:仅SCADA", "M2:近距(40-120m)",
-                    "M3:中距(150-210m)", "M4:远距(240-300m)", "M5:全距离"]
+    group_keys   = ["M0_SCADA",
+                    "M2_near", "M3_mid", "M4_far", "M5_Lall+SCADA",
+                    "N2_near_only", "N3_mid_only", "N4_far_only", "L3a_Lall_only"]
+    group_labels = ["M0:仅SCADA",
+                    "M2:近距+SCADA", "M3:中距+SCADA", "M4:远距+SCADA", "M5:全距+SCADA",
+                    "N2:仅近距", "N3:仅中距", "N4:仅远距", "L3a:仅全距(=N5)"]
 
     for model_name in ["LightGBM", "XGBoost"]:
         sub_m = df_res[df_res["model"] == model_name]
@@ -699,14 +789,16 @@ def _plot_l1_group_heatmap(df_res, plt):
             row = sub_m[sub_m["scenario_key"] == gk].sort_values("step_min")
             rows.append(row["RMSE"].values if not row.empty else [np.nan] * len(_STEP_MINS))
 
-        pivot = pd.DataFrame(
-            rows, index=group_labels, columns=_STEP_MINS)
+        pivot = pd.DataFrame(rows, index=group_labels, columns=_STEP_MINS)
 
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(8, 5.5))
         im = _setup_heatmap_ax(ax, pivot,
-                               f"{model_name}：距离组合 RMSE 热力图（kW，越绿越好）", plt)
+                               f"{model_name}：距离组合 RMSE 热力图（kW，越绿越好）\n"
+                               f"上半：含SCADA（M组）/ 下半：无SCADA（N组）", plt)
         plt.colorbar(im, ax=ax, label="RMSE (kW)")
         ax.set_xlabel("预测步长 (min)", fontsize=11)
+        # 在 M5 和 N2 之间画分隔线
+        ax.axhline(4.5, color="white", linewidth=2)
         plt.tight_layout()
         fpath = os.path.join(OUTPUT_DIR, f"#9_L1b_距离组合热力图_{model_name}.png")
         plt.savefig(fpath, dpi=150)
@@ -875,8 +967,9 @@ def plot_all(df_res, plt):
     print("【生成图表】")
     print("=" * 60)
 
-    _plot_l1_distance_scan(df_res, plt)    # 层1A：逐距离扫描折线图
-    _plot_l1_group_heatmap(df_res, plt)    # 层1B：距离组合热力图
+    _plot_l1_distance_scan(df_res, plt)    # 层1A：逐距离扫描（含SCADA vs 无SCADA 双子图）
+    _plot_l1_group_heatmap(df_res, plt)    # 层1B：距离组合热力图（M组+N组并排）
+    _plot_l1_scada_delta(df_res, plt)      # 层1C：SCADA 干扰量热力图（新增）
     _plot_l2_met_extension(df_res, plt)    # 层2：气象特征增益柱状图
     _plot_l3_scada_removal(df_res, plt)    # 层3：去SCADA对比折线图
     _plot_lstm_key_scenarios(df_res, plt)  # LSTM 关键场景曲线
@@ -890,8 +983,8 @@ def plot_all(df_res, plt):
 def main():
     print()
     print("=" * 60)
-    print("  多步功率预测对比实验（三层分层实验设计）")
-    print(f"  层1：{len(L1_SCENARIOS)} 场景（M0~M5，含逐距离扫描）")
+    print("  多步功率预测对比实验（三层分层实验设计 v3）")
+    print(f"  层1：{len(L1_SCENARIOS)} 场景（M0~M5含SCADA 15个 + N1~N4无SCADA 13个）")
     print(f"  层2：{len(L2_SCENARIOS)} 场景（气象特征增益 E1~E4）")
     print(f"  层3：{len(L3_SCENARIOS)} 场景（去SCADA，L3a~L3b）")
     print(f"  历史回望：{LOOK_BACK} 步（{LOOK_BACK*10} min）")
