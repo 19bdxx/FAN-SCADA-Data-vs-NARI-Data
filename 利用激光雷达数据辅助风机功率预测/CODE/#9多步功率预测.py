@@ -44,10 +44,13 @@ v3 在层1中补充了"仅 LiDAR 无 SCADA"对比组（N 组），验证了
 
 建模策略
 --------
-- LightGBM / XGBoost / GBM（HistGBM）：所有 35 个场景均运行，直接多步策略
+- LightGBM / XGBoost：所有 35 个场景均运行，直接多步策略
   （每预测步长单独训练一个模型，输入为展平的历史特征矩阵）
-- LSTM（双层多输出）：仅在 4 个关键场景运行（M0/M5/L3a/L3b），节省运行时间
-  （一个模型同时预测所有 FORECAST_STEPS 步）
+- HistGBM（sklearn HistGradientBoostingRegressor）：所有 35 个场景（辅助对比）
+- LSTM（双层多输出）：覆盖全部「组合对比场景」15 个（P0/M0/M2~M5/N2~N4/E1~E4/L3a/L3b）
+  （一个模型同时预测所有 FORECAST_STEPS 步），不含逐距离扫描（M1/N1）以节省时间
+
+三模型对比（LightGBM / XGBoost / LSTM）是主要分析框架。
 
 时间连续性约束
 --------------
@@ -117,77 +120,93 @@ _all_met    = _all_vshear + _all_hshear + _all_ti   # 30 个气象特征列
 # ──────────────────────────────────────────────────────────────
 
 # 层1：风速距离结构（1 P组 + 15 个含SCADA场景 + 13 个无SCADA场景 = 29 个场景）
+# ★ 注：所有场景均包含「历史功率」作为输入特征（显示名称中已明确标注）
 L1_SCENARIOS = {
     # ── 功率自回归基准（P 组）────────────────────────────────────
     "P0_power_only": (
         ["power"],
-        "P0: 仅历史功率（无任何风速）", 1),
+        "P0: 仅历史功率（下界基准）", 1),
     # ── 含 SCADA 组（M 组）──────────────────────────────────────
     "M0_SCADA": (
         ["HWS_scada", "power"],
-        "M0: 仅SCADA（无LiDAR）", 1),
+        "M0: SCADA机舱风速+历史功率", 1),
     **{f"M1_{d}m": (
         [f"HWS_{d}m", "HWS_scada", "power"],
-        f"M1: LiDAR {d}m + SCADA", 1)
+        f"M1: LiDAR {d}m+SCADA+历史功率", 1)
        for d in LIDAR_DISTANCES},
     "M2_near": (
         _near_hws + ["HWS_scada", "power"],
-        "M2: 近距(40-120m) + SCADA", 1),
+        "M2: 近距(40-120m)+SCADA+历史功率", 1),
     "M3_mid": (
         _mid_hws + ["HWS_scada", "power"],
-        "M3: 中距(150-210m) + SCADA", 1),
+        "M3: 中距(150-210m)+SCADA+历史功率", 1),
     "M4_far": (
         _far_hws + ["HWS_scada", "power"],
-        "M4: 远距(240-300m) + SCADA", 1),
+        "M4: 远距(240-300m)+SCADA+历史功率", 1),
     "M5_Lall+SCADA": (
         _all_hws + ["HWS_scada", "power"],
-        "M5: 全距离LiDAR + SCADA", 1),
+        "M5: 全距离LiDAR+SCADA+历史功率", 1),
     # ── 无 SCADA 组（N 组）：回答"LiDAR 与 SCADA 是否相互干扰？"────
     **{f"N1_{d}m_only": (
         [f"HWS_{d}m", "power"],
-        f"N1: 仅LiDAR {d}m（无SCADA）", 1)
+        f"N1: LiDAR {d}m+历史功率（无SCADA）", 1)
        for d in LIDAR_DISTANCES},
     "N2_near_only": (
         _near_hws + ["power"],
-        "N2: 仅近距(40-120m)（无SCADA）", 1),
+        "N2: 近距(40-120m)+历史功率（无SCADA）", 1),
     "N3_mid_only": (
         _mid_hws + ["power"],
-        "N3: 仅中距(150-210m)（无SCADA）", 1),
+        "N3: 中距(150-210m)+历史功率（无SCADA）", 1),
     "N4_far_only": (
         _far_hws + ["power"],
-        "N4: 仅远距(240-300m)（无SCADA）", 1),
+        "N4: 远距(240-300m)+历史功率（无SCADA）", 1),
 }
 
 # 层2：气象特征增益（4 个场景，M5 结果作为 E0 基准直接引用）
+# ★ 所有 E 组场景均包含「历史功率」作为输入特征
 L2_SCENARIOS = {
     "E1_AllHWS+SCADA+VShear": (
         _all_hws + ["HWS_scada"] + _all_vshear + ["power"],
-        "E1: 全HWS+SCADA+VShear", 2),
+        "E1: 全HWS+SCADA+VShear+历史功率", 2),
     "E2_AllHWS+SCADA+HShear": (
         _all_hws + ["HWS_scada"] + _all_hshear + ["power"],
-        "E2: 全HWS+SCADA+HShear", 2),
+        "E2: 全HWS+SCADA+HShear+历史功率", 2),
     "E3_AllHWS+SCADA+TI": (
         _all_hws + ["HWS_scada"] + _all_ti + ["power"],
-        "E3: 全HWS+SCADA+TI", 2),
+        "E3: 全HWS+SCADA+TI+历史功率", 2),
     "E4_AllHWS+SCADA+AllMet": (
         _all_hws + ["HWS_scada"] + _all_met + ["power"],
-        "E4: 全HWS+SCADA+全气象", 2),
+        "E4: 全HWS+SCADA+全气象+历史功率", 2),
 }
 
 # 层3：去 SCADA 验证（2 个场景）
+# ★ 所有 L3 场景均包含「历史功率」作为输入特征
 L3_SCENARIOS = {
     "L3a_Lall_only": (
         _all_hws + ["power"],
-        "L3a: 仅全距离LiDAR HWS", 3),
+        "L3a: 全距离LiDAR HWS+历史功率（无SCADA）", 3),
     "L3b_Lall+met_only": (
         _all_hws + _all_met + ["power"],
-        "L3b: 仅LiDAR HWS+全气象", 3),
+        "L3b: 全距离LiDAR HWS+全气象+历史功率（无SCADA）", 3),
 }
 
 ALL_SCENARIOS = {**L1_SCENARIOS, **L2_SCENARIOS, **L3_SCENARIOS}
 
-# LSTM 仅在以下 4 个关键场景运行（21 个全跑耗时过长）
-LSTM_SCENARIOS = {"M0_SCADA", "M5_Lall+SCADA", "L3a_Lall_only", "L3b_Lall+met_only"}
+# LSTM 运行场景（三模型对比：LightGBM / XGBoost / LSTM）
+# 覆盖所有"组合场景"（不含逐距离扫描 M1/N1，避免重复计算），共 12 个核心对比场景
+LSTM_SCENARIOS = {
+    # P 组
+    "P0_power_only",
+    # M 组（含SCADA）
+    "M0_SCADA", "M2_near", "M3_mid", "M4_far", "M5_Lall+SCADA",
+    # N 组（无SCADA）
+    "N2_near_only", "N3_mid_only", "N4_far_only",
+    # E 组（气象特征增益）
+    "E1_AllHWS+SCADA+VShear", "E2_AllHWS+SCADA+HShear",
+    "E3_AllHWS+SCADA+TI", "E4_AllHWS+SCADA+AllMet",
+    # L3 组（去SCADA验证）
+    "L3a_Lall_only", "L3b_Lall+met_only",
+}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -590,8 +609,12 @@ def run_lstm_scenario(df, feat_cols, s_key, s_name, layer):
 def run_all_experiments(df):
     """
     按层依次运行所有场景：
-    - 树模型（LightGBM / XGBoost / GBM）：所有 35 个场景
-    - LSTM：仅 LSTM_SCENARIOS（4 个关键场景）
+    - 树模型（LightGBM / XGBoost / HistGBM）：所有 35 个场景
+    - LSTM：全部「组合对比场景」15 个（LSTM_SCENARIOS，不含逐距离扫描）
+    
+    主要对比框架：LightGBM / XGBoost / LSTM 三模型。
+    HistGBM 作为额外对比保留。
+    所有场景均包含「历史功率」作为输入特征。
     """
     all_results = []
 
