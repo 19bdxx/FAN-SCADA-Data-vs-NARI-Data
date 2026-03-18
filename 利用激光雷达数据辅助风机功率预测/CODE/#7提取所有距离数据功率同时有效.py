@@ -17,6 +17,8 @@ required_cols = [
     'RAWS', 'HWS(hub)', 'HWS(hub)AVL',
     'DIR(hub)', 'Veer', 'VShear', 'HShear',
     'TI1', 'TI2', 'TI3', 'TI4',
+    '平均有功功率_风机导出_前10分钟均值',
+    'ACTIVE_POWER_#56_对齐_前10分钟均值',
     '风机故障'
 ]
 missing_cols = [c for c in required_cols if c not in df.columns]
@@ -61,13 +63,16 @@ columns_to_keep = [
     'TI1',
     'TI2',
     'TI3',
-    'TI4'
+    'TI4',
+    '平均有功功率_风机导出_前10分钟均值',
+    'ACTIVE_POWER_#56_对齐_前10分钟均值',
+    '风机故障'
 ]
 filtered_df = valid_df[columns_to_keep].copy()
 
 # 8. 保存结果
 output_csv_path = r"PROCESS_DATA\#7构建好的训练数据集.csv"
-filtered_df.to_csv(output_csv_path, index=False)
+filtered_df.to_csv(output_csv_path, index=False, encoding='gbk')
 
 # 9. 输出统计信息
 total_time_count = df['DateAndTime'].nunique()
